@@ -1,285 +1,139 @@
+# economia.py — ECONOMIA DO VÉU (MULTI-SERVIDOR + IMERSIVA)
+
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
-import time
 
-from database import load_json, save_json, ensure_user, iso_to_dt
+from database import (
+    load_json, save_json, ensure_user, iso_to_dt, get_guild_config,
+    now_iso, is_premium, premium_message, is_vip  # Adicione is_vip se ainda não tiver
+)
 import config
 
 USERS_DB = config.USERS_DB
-LOG_CHANNEL_ID = getattr(config, "TICKET_LOG_CHANNEL_ID", None)
+GUILDS_DB = config.GUILDS_DB
 
 ADD_LOCK = asyncio.Lock()
 
+# Configurações de recompensas (pode vir da dashboard depois)
+DAILY_REWARD_BASE = 300
+DAILY_VIP_BONUS = 1.5  # 50% extra para VIP
 
-# =========================
-# GARANTIR CARTEIRA
-# =========================
-
-def ensure_wallet(data: dict):
-    data.setdefault("fragmentos", 0)
-    data.setdefault("banco", 0)
-    data.setdefault("mensagens", 0)
-    data.setdefault("tempo_call", 0)
-    data.setdefault("daily_social", 0)
-    data.setdefault("vip_until", None)
-    return data
-
-
-# =========================
-# VIP
-# =========================
-
-def has_vip(data: dict) -> bool:
-    dt = iso_to_dt(data.get("vip_until"))
-    return bool(dt and dt > datetime.utcnow())
-
-
-def vip_bonus(valor: int) -> int:
-    return int(valor * 0.20)
-
-
-# =========================
-# LOG (EMBED ADMIN)
-# =========================
-
-async def send_log_embed(bot, admin, target, quantidade: int):
-    if not LOG_CHANNEL_ID:
-        return
-
-    ch = bot.get_channel(LOG_CHANNEL_ID)
-    if not ch:
-        return
-
-    embed = discord.Embed(
-        title="📈 ADMIN ADICIONOU FRAGMENTOS",
-        color=config.COLOR_SUCCESS,
-        timestamp=datetime.utcnow()
-    )
-
-    embed.add_field(name="👤 Administrador", value=admin.mention, inline=False)
-    embed.add_field(name="🎯 Usuário", value=target.mention, inline=False)
-    embed.add_field(
-        name="💠 Quantidade",
-        value=f"**{quantidade} {config.CURRENCY_NAME}**",
-        inline=False
-    )
-
-    await ch.send(embed=embed)
-
-
-# =========================
-# VIEW APOSTA
-# =========================
-
-class BetConfirmView(discord.ui.View):
-
-    def __init__(self, bot, p1, p2, quantidade: int):
-        super().__init__(timeout=120)
-        self.bot = bot
-        self.p1 = p1
-        self.p2 = p2
-        self.quantidade = quantidade
-
-    @discord.ui.button(label="✅ Aceitar", style=discord.ButtonStyle.green)
-    async def aceitar(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        if interaction.user.id != self.p2.id:
-            return await interaction.response.send_message(
-                "Apenas o desafiado pode aceitar.",
-                ephemeral=True
-            )
-
-        users = load_json(USERS_DB, {})
-
-        p1 = ensure_wallet(ensure_user(users, self.p1.id))
-        p2 = ensure_wallet(ensure_user(users, self.p2.id))
-
-        if p1["fragmentos"] < self.quantidade or p2["fragmentos"] < self.quantidade:
-            return await interaction.response.send_message(
-                "Saldo insuficiente.",
-                ephemeral=True
-            )
-
-        d1 = random.randint(1, 20)
-        d2 = random.randint(1, 20)
-        if d1 == d2:
-            d2 += 1
-
-        if d1 > d2:
-            vencedor = self.p1
-            vdata, pdata = p1, p2
-        else:
-            vencedor = self.p2
-            vdata, pdata = p2, p1
-
-        ganho = self.quantidade
-        if has_vip(vdata):
-            ganho += vip_bonus(self.quantidade)
-
-        vdata["fragmentos"] += ganho
-        pdata["fragmentos"] -= self.quantidade
-
-        save_json(USERS_DB, users)
-
-        texto = (
-            f"🎲 **Ritual do Véu**\n\n"
-            f"{self.p1.mention}: {d1}\n"
-            f"{self.p2.mention}: {d2}\n\n"
-            f"🏆 {vencedor.mention} ganhou **{ganho} {config.CURRENCY_NAME}**"
-        )
-
-        await interaction.response.edit_message(content=texto, view=None)
-
-    @discord.ui.button(label="❌ Recusar", style=discord.ButtonStyle.red)
-    async def recusar(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        if interaction.user.id != self.p2.id:
-            return await interaction.response.send_message(
-                "Apenas o desafiado.",
-                ephemeral=True
-            )
-
-        await interaction.response.edit_message(
-            content="Aposta recusada.",
-            view=None
-        )
-
-
-# =========================
-# VIEW ADMIN REMOVER
-# =========================
-
-class AdminRemoveView(discord.ui.View):
-
-    def __init__(self, target_id: int, quantidade: int):
-        super().__init__(timeout=120)
-        self.target_id = target_id
-        self.quantidade = quantidade
-
-    @discord.ui.button(label="❌ Tirar Fragmentos", style=discord.ButtonStyle.red)
-    async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message(
-                "Apenas administradores.",
-                ephemeral=True
-            )
-
-        users = load_json(USERS_DB, {})
-        data = ensure_wallet(ensure_user(users, self.target_id))
-
-        data["fragmentos"] = max(0, data["fragmentos"] - self.quantidade)
-        save_json(USERS_DB, users)
-
-        await interaction.response.send_message("Removido.", ephemeral=True)
-
-
-# =========================
-# COG ECONOMIA
-# =========================
+WEEKLY_REWARD_BASE = 1500
+WEEKLY_VIP_BONUS = 1.5  # 50% extra para VIP
 
 class Economia(commands.Cog):
-
     def __init__(self, bot):
         self.bot = bot
-        self.call_users = {}
-        self.loop_call.start()
 
-    # =========================
-    # GANHO POR MENSAGEM
-    # =========================
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-
-        if message.author.bot:
-            return
-
+    # /saldo
+    @app_commands.command(name="saldo", description="Contemple seus fragmentos eternos no Véu")
+    async def saldo(self, interaction: discord.Interaction, membro: discord.Member = None):
+        target = membro or interaction.user
         users = load_json(USERS_DB, {})
-        data = ensure_wallet(ensure_user(users, message.author.id))
+        user = ensure_user(users, str(target.id))
 
-        data["fragmentos"] += 2
-        data["mensagens"] += 1
-
-        save_json(USERS_DB, users)
-
-    # =========================
-    # GANHO POR CALL
-    # =========================
-
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-
-        if member.bot:
-            return
-
-        if after.channel and not before.channel:
-            self.call_users[member.id] = time.time()
-
-        elif before.channel and not after.channel:
-            if member.id in self.call_users:
-                tempo = time.time() - self.call_users[member.id]
-                minutos = int(tempo // 60)
-
-                if minutos > 0:
-                    users = load_json(USERS_DB, {})
-                    data = ensure_wallet(ensure_user(users, member.id))
-
-                    ganho = minutos * 3
-                    data["fragmentos"] += ganho
-                    data["tempo_call"] += minutos
-
-                    save_json(USERS_DB, users)
-
-                del self.call_users[member.id]
-
-    @tasks.loop(minutes=5)
-    async def loop_call(self):
-        for guild in self.bot.guilds:
-            for vc in guild.voice_channels:
-                for member in vc.members:
-                    if member.bot:
-                        continue
-                    if member.id not in self.call_users:
-                        self.call_users[member.id] = time.time()
-
-    # =========================
-    # DAILY SOCIAL
-    # =========================
-
-    @app_commands.command(name="daily_social")
-    async def daily_social(self, interaction: discord.Interaction):
-
-        users = load_json(USERS_DB, {})
-        data = ensure_wallet(ensure_user(users, interaction.user.id))
-
-        agora = time.time()
-        ultimo = data.get("daily_social", 0)
-
-        if agora - ultimo < 86400:
-            return await interaction.response.send_message(
-                "⏳ Você já coletou hoje.",
-                ephemeral=True
-            )
-
-        ganho = 250
-        data["fragmentos"] += ganho
-        data["daily_social"] = agora
-
-        save_json(USERS_DB, users)
-
-        await interaction.response.send_message(
-            f"💎 Você recebeu **{ganho} {config.CURRENCY_NAME}**!"
+        embed = discord.Embed(
+            title=f"💎 Fragmentos de {target.display_name}",
+            description=f"**{user.get('fragmentos', 0):,} fragmentos eternos**",
+            color=config.COLOR_PRIMARY
         )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text="Véu Entre Mundos • Sua riqueza entre mundos ♾️")
 
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# =========================
-# SETUP
-# =========================
+    # /daily
+    @app_commands.command(name="daily", description="Resgate sua oferenda diária do Véu")
+    async def daily(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id
+        user_id = str(interaction.user.id)
+
+        async with ADD_LOCK:
+            users = load_json(USERS_DB, {})
+            user = ensure_user(users, user_id)
+
+            agora = datetime.fromisoformat(now_iso())
+            ultimo_daily = iso_to_dt(user["cooldowns"].get("daily"))
+
+            if ultimo_daily and (agora - ultimo_daily) < timedelta(days=1):
+                proximo = ultimo_daily + timedelta(days=1)
+                tempo_restante = proximo - agora
+                horas = tempo_restante.seconds // 3600
+                minutos = (tempo_restante.seconds % 3600) // 60
+                embed = discord.Embed(
+                    title="⏳ O Véu ainda descansa...",
+                    description=f"Volte em {horas}h {minutos}min para a próxima oferenda.",
+                    color=config.COLOR_WARNING
+                )
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            reward = DAILY_REWARD_BASE
+            vip_bonus = ""
+            if is_vip(user):
+                reward = int(reward * DAILY_VIP_BONUS)
+                vip_bonus = "👑 Bônus VIP aplicado! "
+
+            user["fragmentos"] = user.get("fragmentos", 0) + reward
+            user["cooldowns"]["daily"] = now_iso()
+
+            save_json(USERS_DB, users)
+
+            embed = discord.Embed(
+                title="🌙 Oferenda Diária Resgatada!",
+                description=f"Você recebeu **{reward:,} fragmentos**!\n{vip_bonus}\nVolte amanhã para mais.",
+                color=config.COLOR_SUCCESS
+            )
+            embed.set_footer(text="Véu Entre Mundos • Renovação diária ♾️")
+
+            await interaction.response.send_message(embed=embed)
+
+    # /weekly
+    @app_commands.command(name="weekly", description="Resgate sua oferenda semanal do Véu")
+    async def weekly(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+
+        async with ADD_LOCK:
+            users = load_json(USERS_DB, {})
+            user = ensure_user(users, user_id)
+
+            agora = datetime.fromisoformat(now_iso())
+            ultimo_weekly = iso_to_dt(user["cooldowns"].get("weekly"))
+
+            if ultimo_weekly and (agora - ultimo_weekly) < timedelta(days=7):
+                proximo = ultimo_weekly + timedelta(days=7)
+                tempo_restante = proximo - agora
+                dias = tempo_restante.days
+                horas = tempo_restante.seconds // 3600
+                embed = discord.Embed(
+                    title="🕰️ A eternidade ainda não completou o ciclo...",
+                    description=f"Faltam {dias} dias e {horas}h.",
+                    color=config.COLOR_WARNING
+                )
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            reward = WEEKLY_REWARD_BASE
+            vip_bonus = ""
+            if is_vip(user):
+                reward = int(reward * WEEKLY_VIP_BONUS)
+                vip_bonus = "👑 Bônus VIP aplicado! "
+
+            user["fragmentos"] = user.get("fragmentos", 0) + reward
+            user["cooldowns"]["weekly"] = now_iso()
+
+            save_json(USERS_DB, users)
+
+            embed = discord.Embed(
+                title="🏆 Oferenda Semanal Resgatada!",
+                description=f"Você recebeu **{reward:,} fragmentos**!\n{vip_bonus}\nVolte na próxima semana.",
+                color=0xFFD700  # Gold
+            )
+            embed.set_footer(text="Véu Entre Mundos • Dedicação recompensada ♾️")
+
+            await interaction.response.send_message(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Economia(bot))

@@ -1,155 +1,116 @@
-# bot.py
+# main.py — VÉU ENTRE MUNDOS (GLOBAL + BACKEND + MULTI SERVIDOR)
+
 import discord
 from discord.ext import commands
 import asyncio
-import time
 import os
-from datetime import datetime, timezone
-
-import config
-from database import load_json, save_json, ensure_user
-
-# 🔥 IMPORTANTE PARA VIEW PERSISTENTE
-from loja import LojaView
-
-# Adicione pra API backend
+import logging
 from aiohttp import web
 
-# =========================
-# GARANTIA DE PASTAS
-# =========================
-os.makedirs(getattr(config, "GENERATED_PROFILES_PATH", "generated"), exist_ok=True)
-os.makedirs(config.BASE_DATA, exist_ok=True)
+import config
+from database import load_json, save_json, ensure_guild
 
-# =========================
-# INTENTS
-# =========================
+# ─────────────────────────────
+# LOG
+# ─────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("VeuBot")
+
+# ─────────────────────────────
+# BOT CONFIG
+# ─────────────────────────────
+
 intents = discord.Intents.all()
-intents.members = True
-intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-vip_loop_started = False
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or("!"),
+    intents=intents
+)
 
-# =========================
-# EXTENSIONS
-# =========================
-async def load_all():
-    extensions = [
-        "ajuda",
-        "announcements",
-        "anonymous",
-        "autorole",
-        "call_manager",
-        "daily",
-        "economia",
-        "evento",
-        "gifts",
-        "level_system",
-        "loja",
-        "loja_cor",
-        "missoes",
-        "perfil",
-        "ranking",
-        "social",
-        "ticket",
-        "weekly",
-    ]
+# ─────────────────────────────
+# EVENTOS DO BOT
+# ─────────────────────────────
 
-    for ext in extensions:
-        await bot.load_extension(ext)
-        print(f"⚡ Extensão {ext} carregada")
-
-# =========================
-# ON READY
-# =========================
 @bot.event
 async def on_ready():
-    print(f"🔥 Véu conectada como {bot.user} ({bot.user.id})")
+    logger.info(f"Bot online como {bot.user}")
+    logger.info(f"Total de servidores: {len(bot.guilds)}")
 
-    # 🔥 REGISTRA A VIEW PERSISTENTE DA LOJA
-    bot.add_view(LojaView())
+@bot.event
+async def on_guild_join(guild):
+    ensure_guild(str(guild.id))
+    logger.info(f"Entrou no servidor: {guild.name}")
 
-    # ⭐ SYNC SLASH (mantém como você tinha)
-    try:
-        synced = await bot.tree.sync()
-        print(f"⚡ {len(synced)} slash sincronizados GLOBAL")
+# ─────────────────────────────
+# API BACKEND (PORTA 80 FIXA)
+# ─────────────────────────────
 
-        for guild in bot.guilds:
-            gsynced = await bot.tree.sync(guild=guild)
-            print(f"⚡ {len(gsynced)} sincronizados em {guild.name}")
+app = web.Application()
 
-    except Exception as e:
-        print("❌ ERRO SLASH:", e)
+# Health check obrigatório
+async def health(request):
+    return web.Response(text="Veu backend online")
 
-    if not vip_loop_started:
-        bot.loop.create_task(vip_checker_loop())
-        vip_loop_started = True
+app.router.add_get("/", health)
 
-    print("=========================\n")
+# Retorna guilds do bot
+async def get_guilds(request):
+    guild_list = [
+        {
+            "id": str(guild.id),
+            "name": guild.name,
+            "icon": str(guild.icon.url) if guild.icon else None
+        }
+        for guild in bot.guilds
+    ]
+    return web.json_response(guild_list)
 
-# =========================
-# START
-# =========================
-async def main():
-    async with bot:
-        await load_all()
-        bot.loop.create_task(start_api())  # Inicia a API backend
-        await bot.start(config.TOKEN)
+app.router.add_get("/guilds", get_guilds)
 
-# =========================
-# BACKEND API
-# =========================
-async def start_api():
-    app = web.Application()
-    app.router.add_get('/token', handle_token)
-    app.router.add_post('/api/config/{guild_id}', handle_config)
+# Atualiza config da guild
+async def update_config(request):
+    guild_id = request.match_info["guild_id"]
+    data = await request.json()
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', config.API_PORT)  # Usa PORT da Vertra
-    await site.start()
-    print(f"🔥 API backend rodando na porta {config.API_PORT}")
+    guilds = load_json(config.GUILDS_DB)
 
-async def handle_token(request):
-    code = request.query.get('code')
-    if not code:
-        return web.json_response({'error': 'Código não encontrado'}, status=400)
-
-    data = {
-        'client_id': config.DISCORD_CLIENT_ID,
-        'client_secret': config.DISCORD_CLIENT_SECRET,
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': 'https://veu-entre-mundos.netlify.app/callback'  # Seu site na Netlify
-    }
-
-    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post('https://discord.com/api/oauth2/token', data=data, headers=headers) as resp:
-            token_data = await resp.json()
-            return web.json_response(token_data, status=resp.status)
-
-async def handle_config(request):
-    guild_id = request.match_info['guild_id']
-    auth = request.headers.get('Authorization')
-    if not auth or not auth.startswith('Bearer '):
-        return web.json_response({'error': 'Não autorizado'}, status=401)
-
-    try:
-        config_data = await request.json()
-    except:
-        return web.json_response({'error': 'Dados inválidos'}, status=400)
-
-    # Salva no GUILDS_DB
-    guilds = load_json(config.GUILDS_DB, {})
     if guild_id not in guilds:
-        guilds[guild_id] = config.DEFAULT_GUILD_CONFIG.copy()
+        ensure_guild(guild_id)
+        guilds = load_json(config.GUILDS_DB)
 
-    guilds[guild_id].update(config_data)
+    guilds[guild_id].update(data)
     save_json(config.GUILDS_DB, guilds)
 
-    return web.json_response({'success': True, 'message': 'Configs salvas!'})
+    return web.json_response({"success": True})
 
-asyncio.run(main())
+app.router.add_post("/config/{guild_id}", update_config)
+
+# ─────────────────────────────
+# INICIAR API NA PORTA 80
+# ─────────────────────────────
+
+async def start_api():
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", 80)
+        await site.start()
+        logger.info("API iniciada na porta 80")
+    except Exception as e:
+        logger.error(f"Erro ao iniciar API: {e}")
+
+# ─────────────────────────────
+# MAIN
+# ─────────────────────────────
+
+async def main():
+    await start_api()
+    await bot.start(config.TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())

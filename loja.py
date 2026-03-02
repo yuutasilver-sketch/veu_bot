@@ -1,10 +1,12 @@
+# loja.py — LOJA DO VÉU (MULTI-SERVIDOR + DASHBOARD INTEGRADA + IMERSIVA)
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 import io
 from PIL import Image, ImageDraw
 
-from database import load_json, save_json, ensure_user
+from database import load_json, save_json, ensure_user, get_guild_config, is_premium, premium_message
 import config
 
 USERS_DB = config.USERS_DB
@@ -15,9 +17,11 @@ FRAME_PATH = "assets/frame"
 
 PREVIEW_CACHE: dict[str, bytes] = {}
 
+
 # ==================================================
-# ================= SHOP PADRÃO ====================
+# ================= SHOP PADRÃO (EXPANDIDA) ====================
 # ==================================================
+
 
 DEFAULT_SHOP = {
 
@@ -48,15 +52,6 @@ DEFAULT_SHOP = {
         "file": f"{BG_PATH}/abismo.png",
         "desc": "O eco das profundezas",
         "rarity": "ÉPICO"
-    },
-
-    "bg_fragmento": {
-        "type": "background",
-        "name": "Fragmento Primordial",
-        "price": 26000,
-        "file": f"{BG_PATH}/fragmento.png",
-        "desc": "Eco de outra realidade",
-        "rarity": "RARO"
     },
 
     "bg_portal": {
@@ -198,167 +193,206 @@ DEFAULT_SHOP = {
 }
 
 # ==================================================
-# ================= LOAD SHOP ======================
+# UTIL PARA PREVIEW
 # ==================================================
-
-def ensure_shop():
-    data = load_json(SHOP_DB, {})
-    if not data:
-        save_json(SHOP_DB, DEFAULT_SHOP)
-        return DEFAULT_SHOP
-
-    for k, v in DEFAULT_SHOP.items():
-        data.setdefault(k, v)
-
-    save_json(SHOP_DB, data)
-    return data
-
-# ==================================================
-# ================= PREVIEW ========================
-# ==================================================
-
-async def gerar_preview(item, user: discord.User):
-
-    size = 380
-    avatar_bytes = await user.display_avatar.replace(size=512).read()
-    avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((300, 300))
-
-    mask = Image.new("L", (300, 300), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 300, 300), fill=255)
-
-    avatar_round = Image.new("RGBA", (300, 300))
-    avatar_round.paste(avatar, (0, 0), mask)
-
-    base = Image.new("RGBA", (size, size), (20, 20, 20, 255))
-    base.paste(avatar_round, (40, 40), avatar_round)
+async def generate_preview(item_id, item):
+    if item_id in PREVIEW_CACHE:
+        return PREVIEW_CACHE[item_id]
 
     if item["type"] == "background":
-        base = Image.open(item["file"]).convert("RGBA").resize((size, size))
+        img = Image.open(item["file"]).resize((300, 150))
+    elif item["type"] == "frame":
+        img = Image.open(item["file"]).resize((150, 150))
+    else:
+        return None
 
-    if item["type"] == "frame":
-        frame = Image.open(item["file"]).convert("RGBA").resize((size, size))
-        base.paste(frame, (0, 0), frame)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    PREVIEW_CACHE[item_id] = buffer.read()
+    return discord.File(io.BytesIO(PREVIEW_CACHE[item_id]), filename="preview.png")
 
-    buf = io.BytesIO()
-    base.save(buf, "PNG")
-    buf.seek(0)
-
-    return discord.File(buf, filename="preview.png")
 
 # ==================================================
-# ================= VIEW ===========================
+# VIEW PARA LOJA (PERSISTENTE + BOTÕES FUNCIONAIS)
 # ==================================================
-
 class LojaView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.shop = ensure_shop()
-        self.categoria = "background"
-        self.page = 0
-        self.update_items()
 
-    def update_items(self):
-        self.items = [(k, v) for k, v in self.shop.items() if v["type"] == self.categoria]
-        self.page = 0
+    async def build(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
 
-    def get_item(self):
-        return self.items[self.page]
+        if not cfg.get("shop_enabled", True):
+            embed, view = premium_message()
+            return embed, None, view
 
-    async def build(self, interaction):
-        item_id, item = self.get_item()
+        shop = cfg.get("shop_items", DEFAULT_SHOP)
 
         embed = discord.Embed(
-            title=f"{item['name']} • {item['rarity']}",
-            description=item["desc"],
-            color=config.COLOR_PRIMARY
+            title="🛒 Loja Eterna do Véu",
+            description=(
+                "Bem-vindo à loja onde os fragmentos eternos compram relíquias místicas.\n"
+                "Escolha categorias abaixo e troque seus fragmentos por fundos, molduras e mais!\n\n"
+                "💎 Moeda: Fragmentos\n"
+                "👑 VIP: Descontos exclusivos"
+            ),
+            color=0x4b0082,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text="Véu Entre Mundos • Compre e transforme sua jornada ♾️")
+
+        # Botões para categorias (mais visuais)
+        button_fundos = discord.ui.Button(label="Fundos Místicos", style=discord.ButtonStyle.primary, emoji="🌌")
+        button_fundos.callback = self.ver_fundos
+        self.add_item(button_fundos)
+
+        button_molduras = discord.ui.Button(label="Molduras Eternas", style=discord.ButtonStyle.primary, emoji="🖼️")
+        button_molduras.callback = self.ver_molduras
+        self.add_item(button_molduras)
+
+        return embed, None
+
+
+    async def ver_fundos(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
+        shop = cfg.get("shop_items", DEFAULT_SHOP)
+        fundos = {k: v for k, v in shop.items() if v["type"] == "background"}
+
+        embed = discord.Embed(
+            title="🌌 Fundos Místicos do Véu",
+            description="Escolha um fundo para personalizar seu perfil eterno.",
+            color=0x4b0082
         )
 
-        embed.add_field(
-            name="Preço",
-            value=f"{item['price']} {config.CURRENCY_NAME}"
+        for k, v in fundos.items():
+            embed.add_field(
+                name=f"{v['name']} — {v['price']:,} 💎",
+                value=v['descricao'],
+                inline=False
+            )
+
+        view = CompraView("background", fundos, interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+    async def ver_molduras(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
+        shop = cfg.get("shop_items", DEFAULT_SHOP)
+        molduras = {k: v for k, v in shop.items() if v["type"] == "frame"}
+
+        embed = discord.Embed(
+            title="🖼️ Molduras Eternas do Véu",
+            description="Escolha uma moldura para enquadrar sua alma.",
+            color=0x4b0082
         )
 
-        embed.set_footer(
-            text=f"{self.page + 1}/{len(self.items)} • {'Fundos' if self.categoria=='background' else 'Molduras'}"
-        )
+        for k, v in molduras.items():
+            embed.add_field(
+                name=f"{v['name']} — {v['price']:,} 💎",
+                value=v['descricao'],
+                inline=False
+            )
 
-        file = await gerar_preview(item, interaction.user)
+        view = CompraView("frame", molduras, interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ==================================================
+# VIEW PARA COMPRA (COM PREVIEW E CONFIRMAÇÃO)
+# ==================================================
+class CompraView(discord.ui.View):
+    def __init__(self, tipo, itens, user_id):
+        super().__init__(timeout=300)
+        self.tipo = tipo
+        self.itens = itens
+        self.user_id = user_id
+
+    @discord.ui.button(label="Comprar Item", style=discord.ButtonStyle.success, emoji="💎")
+    async def comprar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Apenas você pode comprar em sua loja.", ephemeral=True)
+
+        options = [SelectOption(label=v["name"], value=k) for k, v in self.itens.items()]
+
+        select = ui.Select(placeholder="Selecione o item para comprar...", options=options)
+        select.callback = self.confirmar_compra
+
+        view = discord.ui.View()
+        view.add_item(select)
+
+        await interaction.response.send_message("🌑 Escolha o item a comprar:", view=view, ephemeral=True)
+
+    async def confirmar_compra(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        item = self.itens[item_id]
+        price = item["price"]
+        users = load_json(USERS_DB, {})
+        user = ensure_user(users, self.user_id)
+
+        is_vip = vip_days(user) > 0
+        final_price = int(price * 0.8) if is_vip else price  # 20% off VIP
+
+        if user["fragmentos"] < final_price:
+            return await interaction.response.send_message(f"❌ Fragmentos insuficientes. Precisa de {final_price:,} 💎.", ephemeral=True)
+
+        # Preview
+        file = await generate_preview(item_id, item)
+
+        embed = discord.Embed(
+            title=f"🌑 Confirmar Compra: {item['name']}",
+            description=f"{item['descricao']}\nPreço: {final_price:,} 💎{' (desconto VIP 20%)' if is_vip else ''}",
+            color=0x4b0082
+        )
         embed.set_image(url="attachment://preview.png")
 
-        return embed, file
+        class ConfirmarView(discord.ui.View):
+            @discord.ui.button(label="Confirmar Compra", style=discord.ButtonStyle.success)
+            async def confirmar(self, inter: discord.Interaction, btn: discord.ui.Button):
+                user["fragmentos"] -= final_price
+                if self.tipo == "background":
+                    user.setdefault("owned_backgrounds", []).append(item_id)
+                elif self.tipo == "frame":
+                    user.setdefault("owned_frames", []).append(item_id)
+                save_json(USERS_DB, users)
+                await inter.response.send_message(f"✨ {item['name']} adquirido! Equipado automaticamente.", ephemeral=True)
 
-    @discord.ui.button(label="🎨 Fundos", style=discord.ButtonStyle.blurple, row=0, custom_id="loja_fundos")
-    async def fundos(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.categoria = "background"
-        self.update_items()
-        embed, file = await self.build(interaction)
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+            @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
+            async def cancelar(self, inter: discord.Interaction, btn: discord.ui.Button):
+                await inter.response.send_message("Compra cancelada.", ephemeral=True)
 
-    @discord.ui.button(label="🖼️ Molduras", style=discord.ButtonStyle.secondary, row=0, custom_id="loja_molduras")
-    async def molduras(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.categoria = "frame"
-        self.update_items()
-        embed, file = await self.build(interaction)
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        await interaction.response.send_message(embed=embed, file=file, view=ConfirmarView(), ephemeral=True)
 
-    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.gray, row=1, custom_id="loja_prev")
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = (self.page - 1) % len(self.items)
-        embed, file = await self.build(interaction)
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
 
-    @discord.ui.button(label="➡️", style=discord.ButtonStyle.gray, row=1, custom_id="loja_next")
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = (self.page + 1) % len(self.items)
-        embed, file = await self.build(interaction)
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
-
-    @discord.ui.button(label="🛒 Comprar", style=discord.ButtonStyle.green, row=2, custom_id="loja_comprar")
-    async def comprar(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        users = load_json(USERS_DB, {})
-        data = ensure_user(users, interaction.user.id)
-
-        item_id, item = self.get_item()
-
-        if data.get("fragmentos", 0) < item["price"]:
-            return await interaction.response.send_message("❌ Fragmentos insuficientes.", ephemeral=True)
-
-        if item["type"] == "background":
-            data.setdefault("owned_backgrounds", [])
-            if item_id in data["owned_backgrounds"]:
-                return await interaction.response.send_message("⚠️ Você já possui esse fundo.", ephemeral=True)
-            data["owned_backgrounds"].append(item_id)
-        else:
-            data.setdefault("frames_owned", [])
-            if item_id in data["frames_owned"]:
-                return await interaction.response.send_message("⚠️ Você já possui essa moldura.", ephemeral=True)
-            data["frames_owned"].append(item_id)
-
-        data["fragmentos"] -= item["price"]
-        save_json(USERS_DB, users)
-
-        await interaction.response.send_message("✅ Item comprado com sucesso!", ephemeral=True)
-
-# ==================================================
-# ================= COG ============================
-# ==================================================
-
+# =========================================================
+# COG LOJA
+# =========================================================
 class Loja(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="loja_fixa", description="Envia a loja fixa no canal (somente ADM)")
+    @app_commands.command(name="loja_fixa", description="Invoca a loja fixa no canal (somente ADM)")
     @app_commands.checks.has_permissions(administrator=True)
     async def loja_fixa(self, interaction: discord.Interaction):
 
         await interaction.response.defer(ephemeral=True)
 
-        view = LojaView()
-        embed, file = await view.build(interaction)
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
 
-        await interaction.channel.send(embed=embed, view=view, file=file)
-        await interaction.followup.send("✅ Loja fixa enviada neste canal.", ephemeral=True)
+        if not cfg.get("shop_enabled", True):
+            embed, view = premium_message()
+            return await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+        view = LojaView()
+        embed, _ = await view.build(interaction)
+
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.followup.send("✅ Loja do Véu invocada neste canal.", ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(Loja(bot))

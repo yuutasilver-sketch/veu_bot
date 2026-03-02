@@ -1,155 +1,115 @@
+# ajuda.py — COMANDOS DE AJUDA + LINK PARA O SITE
+
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
+
 import config
-
-
-# =========================
-# COG AJUDA — VÉU
-# =========================
+from database import get_guild_config, premium_message  # Corrigido: premium_message completo
+from views import SiteButtonView
 
 class Ajuda(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-
-    # =========================
     # /ajuda
-    # =========================
-    @app_commands.command(
-        name="ajuda",
-        description="Mostra todos os comandos da Véu"
-    )
+    @app_commands.command(name="ajuda", description="Mostra todos os comandos do Véu")
     async def ajuda(self, interaction: discord.Interaction):
 
-        embed = discord.Embed(
-            title="📜 CENTRAL DE COMANDOS — VÉU",
-            description=(
-                "Aqui estão todos os comandos disponíveis da **Véu Entre Mundos**.\n"
-                "Use com sabedoria… o Véu observa 🕯️"
-            ),
-            color=config.COLOR_PRIMARY
-        )
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
 
-        # 🎫 Tickets
-        embed.add_field(
-            name="🎫 Tickets & Suporte",
-            value=(
-                "`/ticket_painel` → Abrir painel de tickets (ADM)\n"
-                "`/fechar_ticket` → Fechar ticket (Staff)"
-            ),
-            inline=False
-        )
-
-        # 💰 Economia
-        embed.add_field(
-            name="💰 Economia & Perfil",
-            value=(
-                "`/perfil` → Ver seu perfil\n"
-                "`/daily` → Recompensa diária\n"
-                "`/weekly` → Recompensa semanal\n"
-                "`/daily_social` → Bônus social\n"
-                "`/enviar` → Enviar fragmentos para alguém\n"
-                "`/apostar` → Apostar fragmentos"
-            ),
-            inline=False
-        )
-
-        # 🎯 Missões & Eventos
-        embed.add_field(
-            name="🎯 Missões & Eventos",
-            value=(
-                "`/missoes` → Ver missões disponíveis\n"
-                "`/resgatar_missoes` → Resgatar recompensas\n"
-                "`/proximo_evento` → Tempo para próximo evento"
-            ),
-            inline=False
-        )
-
-        # 🛒 Loja
-        embed.add_field(
-            name="🛒 Loja & Customização",
-            value=(
-                "`/loja_fixa` → Enviar loja fixa (ADM)\n"
-                "`/loja_cor_fixa` → Enviar loja de cores (ADM)"
-            ),
-            inline=False
-        )
-
-        # 📊 Ranking
-        embed.add_field(
-            name="📊 Ranking",
-            value=(
-                "`/rank` → Ver ranking do servidor\n"
-                "`/top_fragmentos` → Top economia (se existir)"
-            ),
-            inline=False
-        )
-
-        # 🛠️ Administração
-        embed.add_field(
-            name="🛠️ Administração (Staff)",
-            value=(
-                "`/add_fragmentos` → Adicionar fragmentos (ADM)\n"
-                "`/remover_fragmentos` → Remover fragmentos (ADM)\n"
-                "`/resetar_usuario` → Resetar dados de usuário (ADM)"
-            ),
-            inline=False
-        )
-
-        # 🤖 Informações
-        embed.add_field(
-            name="🤖 Informações",
-            value=(
-                "`/apresentacao` → Conhecer a Véu\n"
-                "`/ajuda` → Ver todos os comandos"
-            ),
-            inline=False
-        )
-
-        embed.set_footer(
-            text="Véu Entre Mundos • Comandos administrativos são restritos"
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-    # =========================
-    # /apresentacao
-    # =========================
-    @app_commands.command(
-        name="apresentacao",
-        description="Conheça a Véu, guardiã do Véu Entre Mundos"
-    )
-    async def apresentacao(self, interaction: discord.Interaction):
+        if not cfg["bot_enabled"]:
+            embed, view = premium_message()
+            return await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         embed = discord.Embed(
-            title="🕯️ VÉU — A GUARDIÃ DO VÉU 🕯️",
+            title="🕯️ Guia do Guardião do Véu",
             description=(
-                "Eu sou **Véu**.\n\n"
-                "Entre mundos, fragmentos e ecos esquecidos,\n"
-                "sou a voz que organiza o caos e observa o invisível.\n\n"
-                "💎 Gerencio a economia de fragmentos.\n"
-                "🎫 Administro tickets e suporte.\n"
-                "📜 Registro decisões e eventos.\n"
-                "🛒 Controlo a Loja e suas raridades.\n"
-                "📊 Mantenho o ranking sob vigilância.\n\n"
-                "Se precisar de ajuda, chame.\n"
-                "Se tentar quebrar as regras… eu verei."
+                "Bem-vindo ao Véu Entre Mundos. Aqui estão os comandos para navegar nesta jornada eterna.\n\n"
+                "**Comandos disponíveis:** (use / para slash commands)"
             ),
-            color=config.COLOR_PRIMARY
+            color=0x4b0082
         )
 
-        embed.set_footer(
-            text="Véu Entre Mundos • Nada passa despercebido"
+        # Economia
+        embed.add_field(
+            name="💎 Economia",
+            value=(
+                "/saldo: Contemple seus fragmentos eternos\n"
+                "/daily: Resgate oferenda diária\n"
+                "/weekly: Resgate oferenda semanal\n"
+                "/work: Trabalhe para ganhar fragmentos\n"
+                "/roubar: Tente roubar fragmentos (cuidado!)"
+            ),
+            inline=False
         )
+
+        # Social
+        embed.add_field(
+            name="♡ Social",
+            value=(
+                "/perfil: Veja seu perfil eterno\n"
+                "/amigos: Gerencie laços de amizade\n"
+                "/casar: Una almas no Véu\n"
+                "/divorciar: Rompa laços eternos\n"
+                "/reputar: Dê reputação a outro viajante"
+            ),
+            inline=False
+        )
+
+        # Tickets
+        embed.add_field(
+            name="📩 Tickets",
+            value=(
+                "/ticket: Invoque um portal de suporte\n"
+                "/fechar_ticket: Feche o portal"
+            ),
+            inline=False
+        )
+
+        # Loja
+        embed.add_field(
+            name="🛒 Loja",
+            value=(
+                "/loja: Abra o bazar eterno\n"
+                "/loja_cor: Tingir sua aura\n"
+                "/presentes: Ofereça dons a outros"
+            ),
+            inline=False
+        )
+
+        # Missões e Ranking
+        embed.add_field(
+            name="🏆 Missões & Ranking",
+            value=(
+                "/missoes: Veja desafios do Véu\n"
+                "/ranking: Contemple os mais poderosos\n"
+                "/nivel: Veja sua ascensão"
+            ),
+            inline=False
+        )
+
+        # Outros
+        embed.add_field(
+            name="⚙️ Outros",
+            value=(
+                "/anon_confissao: Envie segredos anônimos\n"
+                "/evento: Participe de drops eternos\n"
+                "/ajuda: Este guia (recursivo!)"
+            ),
+            inline=False
+        )
+
+        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1428432707284762654/1477310985504034999/ideogram-v3.0_circular_gothic_arcane_logo_badge_for_discord_bot_Veu_elegant_dark_red_wine_cri-0-Photoroom.png")
+
+        embed.set_footer(text="Feito com sangue e neon • Akisil")
 
         await interaction.response.send_message(embed=embed)
-
-
-# =========================
-# SETUP
-# =========================
+        await interaction.followup.send(
+            "🌐 Acesse o painel completo, loja e dashboard no site oficial:",
+            view=SiteButtonView()
+        )
 
 async def setup(bot):
     await bot.add_cog(Ajuda(bot))

@@ -1,255 +1,165 @@
+# loja_cor.py — LOJA DE CORES DO VÉU (MULTI-SERVIDOR + IMERSIVA)
+
 import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta
 
-from database import load_json, save_json, ensure_user
+from database import load_json, save_json, ensure_user, get_guild_config, is_premium, premium_message
 import config
 
 
-# =========================
-# CONFIGURAÇÃO DAS CORES
-# =========================
+USERS_DB = config.USERS_DB
+GUILDS_DB = config.GUILDS_DB
 
-CORES_DISPONIVEIS = {
-    "Violeta do Véu": {"valor": 1500, "hex": 0x8e44ad},
-    "Azul Abissal": {"valor": 1200, "hex": 0x1f3a93},
-    "Rosa Arcano": {"valor": 1000, "hex": 0xff4da6},
-    "Verde Éter": {"valor": 900, "hex": 0x2ecc71},
-    "Dourado Celestial": {"valor": 2000, "hex": 0xf1c40f},
-    "Vermelho Carmesim": {"valor": 1300, "hex": 0xc0392b},
-    "Cinza Fantasma": {"valor": 600, "hex": 0x95a5a6},
-    "Branco Astral": {"valor": 500, "hex": 0xecf0f1},
-    "Preto Cósmico": {"valor": 1800, "hex": 0x2c3e50},
-    "Lilás Nebuloso": {"valor": 1100, "hex": 0xc39bd3},
-    "Ciano Espiritual": {"valor": 800, "hex": 0x1abc9c},
-    "Laranja Eclipse": {"valor": 700, "hex": 0xe67e22},
-    "Azul Gélido": {"valor": 400, "hex": 0x5dade2},
-    "Magenta Sombrio": {"valor": 1400, "hex": 0x9b59b6},
-    "Verde Profundo": {"valor": 100, "hex": 0x145a32},
+
+# =========================================================
+# CONFIG PADRÃO (fallback + MUITAS CORES NOVAS)
+# =========================================================
+
+DEFAULT_CONFIG = {
+    "color_shop_enabled": True,
+    "vip_enabled": True,
+    "vip_discount": 0.20,
+    "vip_price": 1_000_000,
+    "vip_duration_days": 30,
+    "color_base_role": None,
+    "colors": {
+        # Cores clássicas (mantidas)
+        "Violeta do Véu": {"price": 1500, "hex": 0x8e44ad, "descricao": "Um violeta profundo como o Véu noturno."},
+        "Azul Abissal": {"price": 1200, "hex": 0x1f3a93, "descricao": "Azul das profundezas eternas."},
+        "Rosa Arcano": {"price": 1800, "hex": 0xff69b4, "descricao": "Rosa místico de segredos arcano."},
+        "Verde Esmeralda": {"price": 1400, "hex": 0x50c878, "descricao": "Verde de florestas encantadas."},
+        "Dourado Eterno": {"price": 2500, "hex": 0xffd700, "descricao": "Dourado reluzente do Véu dourado."},
+
+        # Novas cores adicionadas (mais 15+ para variedade)
+        "Vermelho Carmesim": {"price": 1600, "hex": 0xdc143c, "descricao": "Vermelho intenso como sangue dos mundos caídos."},
+        "Preto Vazio": {"price": 1000, "hex": 0x000000, "descricao": "Preto absoluto que absorve toda luz."},
+        "Branco Lunar": {"price": 1100, "hex": 0xffffff, "descricao": "Branco puro da luz da lua eterna."},
+        "Laranja Flamejante": {"price": 1300, "hex": 0xff4500, "descricao": "Laranja das chamas que nunca se apagam."},
+        "Ciano Oceânico": {"price": 1700, "hex": 0x00ffff, "descricao": "Ciano das águas abissais do Véu."},
+        "Amarelo Solar": {"price": 1900, "hex": 0xffff00, "descricao": "Amarelo brilhante como sóis distantes."},
+        "Magenta Místico": {"price": 2100, "hex": 0xff00ff, "descricao": "Magenta de magias antigas e proibidas."},
+        "Cinza Sombrio": {"price": 900, "hex": 0x808080, "descricao": "Cinza das sombras esquecidas."},
+        "Turquesa Arcana": {"price": 2000, "hex": 0x40e0d0, "descricao": "Turquesa de portais arcanos."},
+        "Marrom Terreno": {"price": 800, "hex": 0x8b4513, "descricao": "Marrom das terras antigas do Véu."},
+        "Indigo Profundo": {"price": 2200, "hex": 0x4b0082, "descricao": "Índigo das profundezas do Véu."},
+        "Prata Estelar": {"price": 2300, "hex": 0xc0c0c0, "descricao": "Prata que reflete estrelas perdidas."},
+        "Verde Venenoso": {"price": 1450, "hex": 0x00ff00, "descricao": "Verde tóxico das poções proibidas."},
+        "Roxo Imperial": {"price": 2400, "hex": 0x9932cc, "descricao": "Roxo da realeza entre mundos."},
+        "Azul Elétrico": {"price": 1750, "hex": 0x00bfff, "descricao": "Azul elétrico das tempestades cósmicas."},
+        "Marfim Antigo": {"price": 950, "hex": 0xfffff0, "descricao": "Marfim das relíquias esquecidas."},
+        "Bronze Ancestral": {"price": 1050, "hex": 0xcd7f32, "descricao": "Bronze das civilizações perdidas."},
+        "Pêssego Suave": {"price": 850, "hex": 0xffdab9, "descricao": "Pêssego suave como amanhecer no Véu."},
+        "Lavanda Noturna": {"price": 1350, "hex": 0xe6e6fa, "descricao": "Lavanda que floresce sob a lua."},
+        "Safira Profunda": {"price": 2600, "hex": 0x0f52ba, "descricao": "Safira das joias do abismo."}
+    }
 }
 
-VIP_DESCONTO = 0.20
-VIP_PRECO = 1_000_000
-CARGO_BASE_ID = 1462160787840700442
+
+# =========================================================
+# UTIL PARA DESCONTO VIP
+# =========================================================
+def calc_preco(price, is_vip):
+    return int(price * (1 - DEFAULT_CONFIG["vip_discount"]) if is_vip else price)
 
 
-# =========================
-# VIEW PERSISTENTE
-# =========================
-
+# =========================================================
+# VIEW PARA LOJA DE CORES (PERSISTENTE + BOTÕES)
+# =========================================================
 class LojaCorView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild_id):
         super().__init__(timeout=None)
+        self.guild_id = guild_id
 
-        row = 0
-        count = 0
+    @discord.ui.button(label="Comprar Cor", style=discord.ButtonStyle.success, emoji="🎨")
+    async def comprar_cor(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = get_guild_config(self.guild_id)
+        colors = cfg.get("colors", DEFAULT_CONFIG["colors"])
 
-        for nome_cor, dados in CORES_DISPONIVEIS.items():
-            self.add_item(
-                BotaoCor(
-                    nome_cor,
-                    dados["valor"],
-                    dados["hex"],
-                    row=row
-                )
-            )
-            count += 1
-            if count % 5 == 0:
-                row += 1
+        options = [SelectOption(label=nome, value=nome, description=f"{dados['price']} 💎") for nome, dados in colors.items()]
 
-        self.add_item(BotaoVIP(row=row + 1))
+        select = ui.Select(placeholder="Selecione uma cor mística...", options=options)
+        select.callback = self.confirmar_cor
 
+        view = discord.ui.View()
+        view.add_item(select)
 
-# =========================
-# BOTÃO COR
-# =========================
+        await interaction.response.send_message("🌑 Escolha uma cor para tingir sua alma:", view=view, ephemeral=True)
 
-class BotaoCor(discord.ui.Button):
-    def __init__(self, nome, valor, cor_hex, row):
-        super().__init__(
-            label=f"{nome} • {valor}",
-            style=discord.ButtonStyle.secondary,
-            emoji="🎨",
-            row=row,
-            custom_id=f"loja_cor_{nome.lower().replace(' ', '_')}"
-        )
+    async def confirmar_cor(self, interaction: discord.Interaction):
+        nome = interaction.data["values"][0]
+        cfg = get_guild_config(self.guild_id)
+        dados = cfg.get("colors", DEFAULT_CONFIG["colors"]).get(nome)
 
-        self.nome = nome
-        self.valor = valor
-        self.cor_hex = cor_hex
+        users = load_json(USERS_DB, {})
+        user = ensure_user(users, interaction.user.id)
+        is_vip = vip_days(user) > 0
+        price = calc_preco(dados["price"], is_vip)
 
-    async def callback(self, interaction: discord.Interaction):
-
-        if not interaction.guild:
-            return
-
-        users = load_json(config.USERS_DB, {})
-        ensure_user(users, interaction.user.id)
-
-        user_id = str(interaction.user.id)
-        valor_final = self.valor
-
-        vip_role = interaction.guild.get_role(config.VIP_ROLE_ID)
-        is_vip = vip_role and vip_role in interaction.user.roles
-
-        if is_vip:
-            valor_final = int(self.valor * (1 - VIP_DESCONTO))
-
-        if users[user_id]["fragmentos"] < valor_final:
-            return await interaction.response.send_message(
-                f"❌ Você precisa de {valor_final} {config.CURRENCY_NAME}.",
-                ephemeral=True
-            )
-
-        # Remove cores antigas
-        for role in interaction.user.roles:
-            if role.name in CORES_DISPONIVEIS:
-                try:
-                    await interaction.user.remove_roles(role)
-                except:
-                    pass
-
-        role = discord.utils.get(interaction.guild.roles, name=self.nome)
-
-        # 🔥 CRIA E POSICIONA O CARGO CORRETAMENTE
-        if role is None:
-            try:
-                role = await interaction.guild.create_role(
-                    name=self.nome,
-                    color=discord.Color(self.cor_hex),
-                    reason="Compra de cor na Loja"
-                )
-
-                # Rebusca o cargo após criação
-                role = interaction.guild.get_role(role.id)
-
-                cargo_base = interaction.guild.get_role(CARGO_BASE_ID)
-
-                if cargo_base:
-                    await interaction.guild.edit_role_positions(
-                        positions={
-                            role: cargo_base.position + 1
-                        }
-                    )
-
-            except discord.Forbidden:
-                return await interaction.response.send_message(
-                    "❌ Não tenho permissão para criar ou mover cargos.",
-                    ephemeral=True
-                )
-
-        users[user_id]["fragmentos"] -= valor_final
-        save_json(config.USERS_DB, users)
-
-        await interaction.user.add_roles(role)
+        if user["fragmentos"] < price:
+            return await interaction.response.send_message(f"❌ Fragmentos insuficientes. Precisa de {price} 💎.", ephemeral=True)
 
         embed = discord.Embed(
-            title="✨ Cor Aplicada",
-            description=f"🎨 **{self.nome}** ativada!\n💎 Custo: {valor_final} {config.CURRENCY_NAME}",
-            color=self.cor_hex
+            title=f"🎨 Confirmar Cor: {nome}",
+            description=f"{dados['descricao']}\nPreço: {price} 💎{' (desconto VIP)' if is_vip else ''}",
+            color=dados["hex"]
         )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        class ConfirmarCorView(discord.ui.View):
+            @discord.ui.button(label="Confirmar Compra", style=discord.ButtonStyle.success)
+            async def confirmar(self, inter: discord.Interaction, btn: discord.ui.Button):
+                user["fragmentos"] -= price
+                user.setdefault("owned_colors", []).append(nome)
+                user["cor"] = nome  # Equipa automaticamente
+                save_json(USERS_DB, users)
+                await inter.response.send_message(f"✨ Cor **{nome}** adquirida e equipada!", ephemeral=True)
+
+            @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
+            async def cancelar(self, inter: discord.Interaction, btn: discord.ui.Button):
+                await inter.response.send_message("Compra cancelada.", ephemeral=True)
+
+        await interaction.response.send_message(embed=embed, view=ConfirmarCorView(), ephemeral=True)
 
 
-# =========================
-# BOTÃO VIP
-# =========================
-
-class BotaoVIP(discord.ui.Button):
-    def __init__(self, row):
-        super().__init__(
-            label=f"Tornar-se VIP • {VIP_PRECO}",
-            style=discord.ButtonStyle.primary,
-            emoji="👑",
-            row=row,
-            custom_id="loja_vip"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-
-        if not interaction.guild:
-            return
-
-        users = load_json(config.USERS_DB, {})
-        ensure_user(users, interaction.user.id)
-
-        user_id = str(interaction.user.id)
-
-        if users[user_id]["fragmentos"] < VIP_PRECO:
-            return await interaction.response.send_message(
-                f"❌ Você precisa de {VIP_PRECO} {config.CURRENCY_NAME}.",
-                ephemeral=True
-            )
-
-        vip_role = interaction.guild.get_role(config.VIP_ROLE_ID)
-
-        users[user_id]["fragmentos"] -= VIP_PRECO
-
-        expira_em = datetime.utcnow() + timedelta(days=config.VIP_DURATION_DAYS)
-        users[user_id]["vip_until"] = expira_em.isoformat()
-
-        save_json(config.USERS_DB, users)
-
-        await interaction.user.add_roles(vip_role)
-
-        embed = discord.Embed(
-            title="👑 VIP Ativado",
-            description=f"VIP ativo por {config.VIP_DURATION_DAYS} dias!",
-            color=0xf1c40f
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# =========================
-# COG
-# =========================
-
+# =========================================================
+# COG LOJA COR
+# =========================================================
 class LojaCor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def cog_load(self):
-        self.bot.add_view(LojaCorView())
-
-    @app_commands.command(
-        name="loja_cor_fixa",
-        description="Envia a Loja de Cores fixa no canal (Somente ADM)"
-    )
+    @app_commands.command(name="loja_cor", description="Invoca a loja de cores no canal (ADM apenas)")
     @app_commands.checks.has_permissions(administrator=True)
-    async def loja_cor_fixa(self, interaction: discord.Interaction):
+    async def loja_cor(self, interaction: discord.Interaction):
 
-        descricao = "Escolha sua cor personalizada.\n\n"
+        await interaction.response.defer(ephemeral=True)
 
-        for nome, dados in CORES_DISPONIVEIS.items():
-            descricao += f"🎨 **{nome}** — {dados['valor']} {config.CURRENCY_NAME}\n"
+        guild_id = interaction.guild.id
+        cfg = get_guild_config(guild_id)
 
-        descricao += "\n👑 VIP recebe 20% de desconto\n🎭 Apenas uma cor ativa por vez"
+        if not cfg.get("color_shop_enabled", True):
+            embed, view = premium_message()
+            return await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+        colors = cfg.get("colors", DEFAULT_CONFIG["colors"])
+
+        descricao = "Escolha sua cor personalizada no Véu.\n\n"
+
+        for nome, dados in colors.items():
+            descricao += f"🎨 **{nome}** — {dados['price']} 💎\n{dados['descricao']}\n"
+
+        descricao += "\n👑 VIP recebe desconto\n🎭 Apenas uma cor ativa por alma"
 
         embed = discord.Embed(
-            title="🎨 LOJA DE CORES — VÉU ENTRE MUNDOS",
+            title="🎨 Loja de Cores Eternas do Véu",
             description=descricao,
             color=config.COLOR_PRIMARY
         )
+        embed.set_footer(text="Véu Entre Mundos • Tingir sua jornada ♾️")
 
-        embed.set_image(
-            url="https://cdn.discordapp.com/attachments/1463584126316580986/1476283442101752032/ChatGPT_Image_25_de_fev._de_2026_15_23_03.png"
-        )
-
-        embed.set_thumbnail(
-            url="https://cdn.discordapp.com/attachments/1463584126316580986/1476289481975005236/ChatGPT_Image_25_de_fev._de_2026_15_47_03.png"
-        )
-
-        embed.set_footer(text="Véu Entre Mundos • Personalize sua essência")
-
-        await interaction.response.send_message("✅ Loja enviada.", ephemeral=True)
-
-        await interaction.channel.send(
-            embed=embed,
-            view=LojaCorView()
-        )
+        await interaction.channel.send(embed=embed, view=LojaCorView(guild_id))
+        await interaction.followup.send("✅ Loja de Cores invocada neste canal.", ephemeral=True)
 
 
 async def setup(bot):

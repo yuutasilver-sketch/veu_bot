@@ -1,84 +1,56 @@
 import discord
-from discord.ext import commands
-from datetime import datetime, timedelta
-import config
+from discord.ext import commands  # Corrigido
+from datetime import datetime, timedelta  # Corrigido
+from datetime import timezone  # Adicionado para tz=timezone.utc
 
+from database import load_json, get_guild_config  # Corrigido
+import config
 
 class AutoRole(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ===============================
+    # =========================
     # EVENTO: MEMBRO ENTROU
-    # ===============================
+    # =========================
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
 
-        # Ignorar bots
         if member.bot:
             return
 
         guild = member.guild
+        guild_id = guild.id
 
-        # ===============================
-        # CARGO PADRÃO
-        # ===============================
-        try:
-            default_role = guild.get_role(config.DEFAULT_ROLE_ID)
-            if default_role:
-                await member.add_roles(
-                    default_role,
-                    reason="AutoRole: cargo padrão"
-                )
-        except Exception:
-            pass
+        cfg = get_guild_config(guild_id)
 
-        # ===============================
-        # CONTA NOVA / ANTIGA
-        # ===============================
-        try:
-            account_age = datetime.utcnow() - member.created_at
+        roles_to_add = []
 
-            # Conta nova (menos de 7 dias)
-            if hasattr(config, "NEW_ACCOUNT_ROLE_ID"):
-                if account_age < timedelta(days=7):
-                    role = guild.get_role(config.NEW_ACCOUNT_ROLE_ID)
-                    if role:
-                        await member.add_roles(
-                            role,
-                            reason="AutoRole: conta nova"
-                        )
+        # Cargos por tempo de conta
+        time_roles = cfg["autorole_time_roles"]  # List from dashboard [{"days": 7, "role_id": 123}]
 
-            # Conta antiga
-            if hasattr(config, "OLD_ACCOUNT_ROLE_ID"):
-                if account_age >= timedelta(days=7):
-                    role = guild.get_role(config.OLD_ACCOUNT_ROLE_ID)
-                    if role:
-                        await member.add_roles(
-                            role,
-                            reason="AutoRole: conta antiga"
-                        )
-        except Exception:
-            pass
+        account_age = datetime.now(tz=timezone.utc) - member.created_at
 
-        # ===============================
-        # VIP AUTOMÁTICO (se já tiver)
-        # ===============================
-        try:
-            if hasattr(config, "VIP_ROLE_ID"):
-                vip_role = guild.get_role(config.VIP_ROLE_ID)
+        for tr in time_roles:
+            days = tr.get("days", 0)
+            role_id = tr.get("role_id")
+            if role_id and account_age >= timedelta(days=days):
+                role = guild.get_role(role_id)
+                if role:
+                    roles_to_add.append(role)
 
-                if vip_role and vip_role in member.roles:
-                    await member.add_roles(
-                        vip_role,
-                        reason="AutoRole: VIP automático"
-                    )
-        except Exception:
-            pass
+        # Cargo VIP automático
+        vip_role_id = cfg["autorole_vip"]
+        users = load_json(config.USERS_DB, {})
+        uid = str(member.id)
+        user = ensure_user(users, uid)
+        if vip_role_id and is_vip(user):  # Usando a nova função de database.py
+            role = guild.get_role(vip_role_id)
+            if role:
+                roles_to_add.append(role)
 
+        if roles_to_add:
+            await member.add_roles(*roles_to_add, reason="Véu AutoRole")
 
-# ===============================
-# SETUP DO COG
-# ===============================
 async def setup(bot):
     await bot.add_cog(AutoRole(bot))
